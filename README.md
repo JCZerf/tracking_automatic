@@ -52,6 +52,15 @@ A aplicação fica disponível em:
 - `http://127.0.0.1:8000/` → redireciona para a documentação Swagger
 - `http://127.0.0.1:8000/docs` → documentação interativa
 
+Por padrão, o CORS aceita o front Vite em `http://localhost:5173` e
+`http://127.0.0.1:5173`. Para permitir um front publicado, configure uma ou
+mais origens separadas por vírgula, sem caminhos:
+
+```powershell
+$env:CORS_ORIGINS="https://tracking-automatic-web.vercel.app"
+uvicorn main:app --reload
+```
+
 ## Exemplo de requisição
 
 ```http
