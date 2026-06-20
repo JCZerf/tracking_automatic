@@ -6,6 +6,7 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,https://tracking-automatic-web.vercel.app}"
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
