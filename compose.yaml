@@ -6,17 +6,15 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
-      BROWSER_HEADLESS: "true"
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
     cpus: 1.0
     mem_limit: 512m
-    shm_size: 128m
     init: true
     restart: unless-stopped
     volumes:
-      - paddle-models:/home/pwuser/.paddlex
+      - paddle-models:/home/appuser/.paddlex
     healthcheck:
       test:
         - CMD
