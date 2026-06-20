@@ -33,3 +33,6 @@ blob-report/
 .vscode/
 .DS_Store
 Thumbs.db
+
+#artefatos de desenvolvimento
+artefatos/

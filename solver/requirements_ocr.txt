@@ -1,0 +1,5 @@
+# OCR e mecanismo de inferencia
+paddleocr>=3.7.0,<4.0.0
+paddlepaddle>=3.3.1,<4.0.0
+
+

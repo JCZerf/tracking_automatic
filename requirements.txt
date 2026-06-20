@@ -1,3 +1,5 @@
+-r solver/requirements_ocr.txt
+
 fastapi
 uvicorn[standard]
 playwright
