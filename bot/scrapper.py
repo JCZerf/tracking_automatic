@@ -1,246 +1,208 @@
-"""Preenche o codigo de rastreamento no site dos Correios."""
+"""Consulta rastreamentos dos Correios usando uma sessao HTTP."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
+import unicodedata
 from datetime import datetime
-from enum import StrEnum
 from pathlib import Path
-import re
 from tempfile import TemporaryDirectory
+from typing import Any
+from urllib.parse import urljoin
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Locator, Page
+import httpx
+from bs4 import BeautifulSoup
 
-from .browser import FirefoxBrowser
 from .exceptions import (
     CaptchaRetriesExhaustedError,
     CorreiosUnavailableError,
     InvalidTrackingCodeError,
-    TrackingScraperError,
     TrackingNotFoundError,
+    TrackingScraperError,
 )
-from .models import QueryValidationArtifact, TrackingEvent, TrackingResult
+from .models import TrackingEvent, TrackingResult
 from solver.paddle_ocr import PaddleCaptchaOcr
 
 
 TRACKING_URL = "https://rastreamento.correios.com.br/app/index.php"
 TRACKING_CODE = "TJ 481 246 775 BR"
-TRACKING_INPUT_SELECTOR = "#objeto"
-CAPTCHA_IMAGE_SELECTOR = "#captcha_image"
-CAPTCHA_INPUT_SELECTOR = "#captcha"
-SEARCH_BUTTON_SELECTOR = "#b-pesquisar"
-FULL_RESULTS_SELECTOR = "#ver-rastro-unico"
-EVENT_SELECTOR = f"{FULL_RESULTS_SELECTOR} .ship-steps > li.step"
-SUBMISSION_TIMEOUT_MS = 15_000
 MAX_CAPTCHA_ATTEMPTS = 3
-CORREIOS_TIMEZONE = ZoneInfo("America/Sao_Paulo")
-CORREIOS_DATETIME_FORMAT = "%d/%m/%Y %H:%M"
+REQUEST_TIMEOUT_SECONDS = 30
 INVALID_TRACKING_CODE_MESSAGE = "Código de objeto, CPF ou CNPJ informado não está válido"
-TRACKING_NOT_FOUND_MESSAGE = "Objeto não encontrado na base de dados dos Correios"
 INVALID_CAPTCHA_MESSAGE = "Captcha inválido"
+HTTP_HEADERS = {
+    "Accept-Language": "pt-BR,pt;q=0.9",
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) "
+        "Gecko/20100101 Firefox/146.0"
+    ),
+}
 
 
-class SubmissionOutcome(StrEnum):
-    SUCCESS = "success"
-    INVALID_TRACKING_CODE = "invalid_tracking_code"
-    TRACKING_NOT_FOUND = "tracking_not_found"
-    INVALID_CAPTCHA = "invalid_captcha"
+def normalize_tracking_code(tracking_code: str) -> str:
+    return "".join(character for character in tracking_code if character.isalnum()).upper()
 
 
-def normalize_text(value: str) -> str:
-    return " ".join(value.split())
-
-
-async def read_element_text(element: Locator) -> str:
-    text = await element.evaluate(
-        """element => {
-            const clone = element.cloneNode(true);
-            clone.querySelectorAll('br').forEach(br => br.replaceWith(' '));
-            return clone.textContent || '';
-        }"""
+def format_address(address: dict[str, Any]) -> str:
+    city = address.get("cidade")
+    state = address.get("uf")
+    city_state = " - ".join(value for value in (city, state) if value)
+    return ", ".join(
+        value
+        for value in (
+            address.get("logradouro"),
+            address.get("numero"),
+            address.get("bairro"),
+            city_state,
+        )
+        if value
     )
-    return normalize_text(text)
 
 
-async def extract_event(event: Locator) -> TrackingEvent:
-    paragraphs = [
-        text
-        for paragraph in await event.locator(".step-content > p").all()
-        if (text := await read_element_text(paragraph))
-    ]
-    if len(paragraphs) < 2:
-        raise ValueError("Evento dos Correios sem descricao ou data")
+def format_unit(unit: dict[str, Any] | None, include_type: bool = True) -> str:
+    if not unit:
+        return ""
 
-    occurred_at = datetime.strptime(paragraphs[-1], CORREIOS_DATETIME_FORMAT).replace(
-        tzinfo=CORREIOS_TIMEZONE
-    )
+    address = unit.get("endereco") or {}
+    location = format_address(address)
+    unit_type = unit.get("tipo") if include_type else ""
+    return ", ".join(value for value in (unit_type, location) if value)
+
+
+def build_event_details(event: dict[str, Any]) -> tuple[str, ...]:
+    code = event.get("codigo")
+    origin = format_unit(event.get("unidade"), include_type=code not in {"LDI", "PO"})
+    destination = format_unit(event.get("unidadeDestino"))
+    details: list[str] = []
+
+    if origin:
+        details.append(f"Pela {origin}" if code == "BDI" else origin)
+    if destination:
+        details.append(f"Para {destination}")
+    if event.get("detalhe"):
+        details.append(event["detalhe"])
+
+    return tuple(details)
+
+
+def parse_event(event: dict[str, Any]) -> TrackingEvent:
+    date_data = event.get("dtHrCriado") or {}
+    date_value = date_data.get("date")
+    if not date_value:
+        raise ValueError("Evento dos Correios sem data")
+
+    timezone = ZoneInfo(date_data.get("timezone") or "America/Sao_Paulo")
+    occurred_at = datetime.fromisoformat(date_value).replace(tzinfo=timezone)
     return TrackingEvent(
-        description=paragraphs[0],
-        details=tuple(paragraphs[1:-1]),
+        description=event.get("descricao") or event.get("descricaoFrontEnd") or "",
+        details=build_event_details(event),
         occurred_at=occurred_at,
     )
 
 
-async def extract_tracking_result(
-    page: Page,
-    tracking_code: str,
-    validation_artifact: QueryValidationArtifact,
-) -> TrackingResult:
-    """Converte o HTML de resultado dos Correios em um modelo da API."""
-    result = page.locator(FULL_RESULTS_SELECTOR)
-    events_locator = page.locator(EVENT_SELECTOR)
-    event_count = await events_locator.count()
-    if event_count == 0:
-        raise RuntimeError("A consulta nao retornou eventos de rastreamento")
+def parse_tracking_result(payload: dict[str, Any]) -> TrackingResult:
+    events = tuple(parse_event(event) for event in payload.get("eventos") or [])
+    if not events:
+        raise CorreiosUnavailableError("A consulta não retornou eventos de rastreamento")
 
-    events = tuple(
-        [await extract_event(events_locator.nth(index)) for index in range(event_count)]
-    )
-    service = normalize_text(
-        await result.locator(".cabecalho-content .text-content").first.inner_text()
-    )
-
+    postal_type = payload.get("tipoPostal") or {}
     return TrackingResult(
-        tracking_code="".join(tracking_code.split()).upper(),
-        service=service,
+        tracking_code=payload.get("codObjeto") or "",
+        service=postal_type.get("categoria") or postal_type.get("descricao") or "",
         current_status=events[0].description,
         events=events,
-        validation_artifact=validation_artifact,
     )
-
-
-async def wait_for_submission_outcome(page: Page) -> SubmissionOutcome:
-    """Aguarda o resultado ou uma das mensagens conhecidas do site."""
-    locators = {
-        SubmissionOutcome.SUCCESS: page.locator(EVENT_SELECTOR).first,
-        SubmissionOutcome.INVALID_TRACKING_CODE: page.get_by_text(
-            re.compile(re.escape(INVALID_TRACKING_CODE_MESSAGE), re.IGNORECASE)
-        ).first,
-        SubmissionOutcome.TRACKING_NOT_FOUND: page.get_by_text(
-            re.compile(re.escape(TRACKING_NOT_FOUND_MESSAGE), re.IGNORECASE)
-        ).first,
-        SubmissionOutcome.INVALID_CAPTCHA: page.get_by_text(
-            re.compile(re.escape(INVALID_CAPTCHA_MESSAGE), re.IGNORECASE)
-        ).first,
-    }
-    tasks = {
-        asyncio.create_task(
-            locator.wait_for(
-                state="attached" if outcome is SubmissionOutcome.SUCCESS else "visible",
-                timeout=SUBMISSION_TIMEOUT_MS,
-            )
-        ): outcome
-        for outcome, locator in locators.items()
-    }
-
-    done, pending = await asyncio.wait(
-        tasks,
-        timeout=SUBMISSION_TIMEOUT_MS / 1_000,
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for task in pending:
-        task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
-
-    successful_tasks = [task for task in done if task.exception() is None]
-    if not successful_tasks:
-        raise CorreiosUnavailableError("Os Correios não responderam no tempo esperado")
-
-    return tasks[successful_tasks[0]]
 
 
 async def recognize_captcha(
-    page: Page,
+    client: httpx.AsyncClient,
+    captcha_url: str,
     recognizer: PaddleCaptchaOcr,
 ) -> str:
-    """Captura e reconhece o CAPTCHA exibido na pagina."""
+    response = await client.get(captcha_url, params={"_": uuid4().hex})
+    response.raise_for_status()
+
     with TemporaryDirectory(prefix="tracking-captcha-") as temp_dir:
         captcha_path = Path(temp_dir) / "captcha.png"
-        await page.locator(CAPTCHA_IMAGE_SELECTOR).screenshot(path=captcha_path)
+        captcha_path.write_bytes(response.content)
         ocr_result = await asyncio.to_thread(recognizer.recognize, captcha_path)
 
     captcha_text = "".join(character for character in ocr_result.text if character.isalnum())
-    if not captcha_text:
-        raise CaptchaRetriesExhaustedError("PaddleOCR não reconheceu o CAPTCHA")
-
     return captcha_text
 
 
-async def capture_query_artifact(page: Page) -> QueryValidationArtifact:
-    """Captura a tela com o resultado exibido para auditoria da consulta."""
-    await page.locator("#tabs-rastreamento").scroll_into_view_if_needed()
-    screenshot = await page.screenshot(
-        type="jpeg",
-        quality=80,
-        animations="disabled",
+def raise_response_error(payload: dict[str, Any]) -> None:
+    message = payload.get("mensagem") or "Resposta de erro não identificada dos Correios"
+    normalized_message = "".join(
+        character
+        for character in unicodedata.normalize("NFD", message.lower())
+        if unicodedata.category(character) != "Mn"
     )
-    return QueryValidationArtifact(
-        media_type="image/jpeg",
-        image_base64=base64.b64encode(screenshot).decode("ascii"),
-    )
-
-
-def raise_for_outcome(outcome: SubmissionOutcome) -> None:
-    if outcome is SubmissionOutcome.INVALID_TRACKING_CODE:
-        raise InvalidTrackingCodeError(INVALID_TRACKING_CODE_MESSAGE)
-    if outcome is SubmissionOutcome.TRACKING_NOT_FOUND:
-        raise TrackingNotFoundError(TRACKING_NOT_FOUND_MESSAGE)
+    if "objeto" in normalized_message and (
+        "invalido" in normalized_message or "nao esta valido" in normalized_message
+    ):
+        raise InvalidTrackingCodeError(message)
+    if "objeto nao encontrado" in normalized_message:
+        raise TrackingNotFoundError(message)
+    raise CorreiosUnavailableError(message)
 
 
 async def track_package(
     tracking_code: str,
     recognizer: PaddleCaptchaOcr | None = None,
 ) -> TrackingResult:
-    """Consulta um objeto nos Correios e retorna seu historico estruturado."""
+    """Consulta um objeto e retorna seu historico estruturado."""
+    normalized_code = normalize_tracking_code(tracking_code)
+    if not normalized_code:
+        raise InvalidTrackingCodeError(INVALID_TRACKING_CODE_MESSAGE)
+
+    recognizer = recognizer or await asyncio.to_thread(PaddleCaptchaOcr)
     try:
-        return await _track_package(tracking_code, recognizer)
+        async with httpx.AsyncClient(
+            headers=HTTP_HEADERS,
+            follow_redirects=True,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        ) as client:
+            index_response = await client.get(TRACKING_URL)
+            index_response.raise_for_status()
+            captcha_element = BeautifulSoup(index_response.text, "html.parser").select_one(
+                "#captcha_image"
+            )
+            if captcha_element is None or not captcha_element.get("src"):
+                raise CorreiosUnavailableError("CAPTCHA não encontrado na página dos Correios")
+
+            captcha_url = urljoin(str(index_response.url), str(captcha_element["src"]))
+            result_url = urljoin(str(index_response.url), "resultado.php")
+
+            for _attempt in range(MAX_CAPTCHA_ATTEMPTS):
+                captcha_text = await recognize_captcha(client, captcha_url, recognizer)
+                if not captcha_text:
+                    continue
+                result_response = await client.get(
+                    result_url,
+                    params={"objeto": normalized_code, "captcha": captcha_text, "mqs": "S"},
+                )
+                result_response.raise_for_status()
+                payload = result_response.json()
+
+                if payload.get("mensagem") == INVALID_CAPTCHA_MESSAGE:
+                    continue
+                if payload.get("erro"):
+                    raise_response_error(payload)
+                return parse_tracking_result(payload)
+
     except TrackingScraperError:
         raise
-    except PlaywrightError as error:
+    except (httpx.HTTPError, ValueError) as error:
         raise CorreiosUnavailableError(
             "Não foi possível concluir a comunicação com o site dos Correios"
         ) from error
 
-
-async def _track_package(
-    tracking_code: str,
-    recognizer: PaddleCaptchaOcr | None,
-) -> TrackingResult:
-    recognizer = recognizer or await asyncio.to_thread(PaddleCaptchaOcr)
-
-    async with FirefoxBrowser() as browser:
-        async with browser.new_page() as page:
-            await page.goto(TRACKING_URL, wait_until="domcontentloaded")
-
-            tracking_input = page.locator(TRACKING_INPUT_SELECTOR)
-            await tracking_input.click()
-            await tracking_input.press_sequentially(tracking_code, delay=50)
-
-            captcha_input = page.locator(CAPTCHA_INPUT_SELECTOR)
-            for attempt in range(1, MAX_CAPTCHA_ATTEMPTS + 1):
-                recognized_captcha = await recognize_captcha(page, recognizer)
-                await captcha_input.fill(recognized_captcha)
-
-                await page.locator(SEARCH_BUTTON_SELECTOR).click()
-                outcome_task = asyncio.create_task(wait_for_submission_outcome(page))
-                outcome = await outcome_task
-
-                if outcome is SubmissionOutcome.SUCCESS:
-                    validation_artifact = await capture_query_artifact(page)
-                    return await extract_tracking_result(
-                        page,
-                        tracking_code,
-                        validation_artifact,
-                    )
-
-                raise_for_outcome(outcome)
-
-            raise CaptchaRetriesExhaustedError(
-                f"Captcha inválido após {MAX_CAPTCHA_ATTEMPTS} tentativas"
-            )
+    raise CaptchaRetriesExhaustedError(
+        f"Captcha inválido após {MAX_CAPTCHA_ATTEMPTS} tentativas"
+    )
 
 
 async def main() -> None:

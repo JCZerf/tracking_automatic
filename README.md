@@ -24,7 +24,7 @@ docker compose logs -f
 ```
 
 O Compose limita o serviço a 1 CPU e 512 MB de RAM. Nesse perfil, as consultas
-são processadas uma por vez para evitar concorrência entre Firefox e PaddleOCR.
+são processadas uma por vez para evitar concorrência no PaddleOCR.
 
 Para encerrar:
 

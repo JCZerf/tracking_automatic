@@ -20,13 +20,6 @@ class TrackingEvent(BaseModel):
     occurred_at: datetime
 
 
-class QueryValidationArtifact(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    media_type: str
-    image_base64: str
-
-
 class TrackingResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -34,4 +27,3 @@ class TrackingResult(BaseModel):
     service: str
     current_status: str
     events: tuple[TrackingEvent, ...]
-    validation_artifact: QueryValidationArtifact
