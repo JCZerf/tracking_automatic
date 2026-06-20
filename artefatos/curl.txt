@@ -1,0 +1,13 @@
+curl ^"https://me.kis.v2.scr.kaspersky-labs.com/7D8B79A2-8974-4D7B-A76A-F4F29624C06B6m7SDlZvxvRVK6QqmvsRZV8o4KUKGT6pU0rGRcNaHt5TidwRbJuFoBMH1_bdLiLiTt_vZx3B-YhQyENkY4hzNw/init?data=eyJ1cmwiOiJodHRwczovL3Jhc3RyZWFtZW50by5jb3JyZWlvcy5jb20uYnIvYXBwL2luZGV4LnBocCIsInBsdWdpbnMiOiJ3bnQmd3NtJmNhJnZzJnVhJmtwbSZhYm4mYWJuX3NoYWRvdyZjYiIsImRhdGEiOnsiZGF0YSI6W3sicGx1Z2luIjoid250IiwicGFyYW1ldGVycyI6IntcInJlZmVycmVyXCI6XCJodHRwczovL3d3dy5iaW5nLmNvbS9cIn0ifSx7InBsdWdpbiI6IndzbSIsInBhcmFtZXRlcnMiOiJ7XCJyZWZlcnJlclwiOlwiaHR0cHM6Ly93d3cuYmluZy5jb20vXCIsXCJzdHViSWRcIjpcIlwifSJ9LHsicGx1Z2luIjoidWEiLCJwYXJhbWV0ZXJzIjoie30ifSx7InBsdWdpbiI6ImFibiIsInBhcmFtZXRlcnMiOiJ7XCJpc0Nzc1VybEluamVjdGVkXCI6ZmFsc2V9In0seyJwbHVnaW4iOiJhYm5fc2hhZG93IiwicGFyYW1ldGVycyI6IntcImlzQ3NzVXJsSW5qZWN0ZWRcIjpmYWxzZX0ifV19LCJpc1RvcExldmVsIjp0cnVlLCJwYWdlU3RhcnRUaW1lIjowLCJuYXZpZ2F0aW9uU3RhcnRUaW1lIjoxNzgxOTY0NTEyMjI4fQ^%^3D^%^3D^&nocache=1805d^&tm=2026-06-20T14^%^3A08^%^3A32.417Z^" ^
+  -H ^"accept: */*^" ^
+  -H ^"accept-language: pt-BR,pt;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,pt-PT;q=0.5^" ^
+  -H ^"origin: https://rastreamento.correios.com.br^" ^
+  -H ^"priority: u=1, i^" ^
+  -H ^"referer: https://rastreamento.correios.com.br/^" ^
+  -H ^"sec-ch-ua: ^\^"Microsoft Edge^\^";v=^\^"149^\^", ^\^"Chromium^\^";v=^\^"149^\^", ^\^"Not)A;Brand^\^";v=^\^"24^\^"^" ^
+  -H ^"sec-ch-ua-mobile: ?0^" ^
+  -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^" ^
+  -H ^"sec-fetch-dest: empty^" ^
+  -H ^"sec-fetch-mode: cors^" ^
+  -H ^"sec-fetch-site: cross-site^" ^
+  -H ^"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0^"
