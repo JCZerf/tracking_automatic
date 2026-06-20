@@ -11,6 +11,7 @@ import re
 from tempfile import TemporaryDirectory
 from zoneinfo import ZoneInfo
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page
 
 from .browser import FirefoxBrowser
@@ -18,6 +19,7 @@ from .exceptions import (
     CaptchaRetriesExhaustedError,
     CorreiosUnavailableError,
     InvalidTrackingCodeError,
+    TrackingScraperError,
     TrackingNotFoundError,
 )
 from .models import CaptchaValidationArtifact, TrackingEvent, TrackingResult
@@ -183,6 +185,17 @@ def raise_for_outcome(outcome: SubmissionOutcome) -> None:
 
 async def track_package(tracking_code: str) -> TrackingResult:
     """Consulta um objeto nos Correios e retorna seu historico estruturado."""
+    try:
+        return await _track_package(tracking_code)
+    except TrackingScraperError:
+        raise
+    except PlaywrightError as error:
+        raise CorreiosUnavailableError(
+            "Não foi possível concluir a comunicação com o site dos Correios"
+        ) from error
+
+
+async def _track_package(tracking_code: str) -> TrackingResult:
     recognizer = await asyncio.to_thread(PaddleCaptchaOcr)
 
     async with FirefoxBrowser() as browser:
@@ -198,9 +211,8 @@ async def track_package(tracking_code: str) -> TrackingResult:
                 validation_artifact = await recognize_captcha(page, recognizer)
                 await captcha_input.fill(validation_artifact.recognized_text)
 
-                outcome_task = asyncio.create_task(wait_for_submission_outcome(page))
-                await asyncio.sleep(0)
                 await page.locator(SEARCH_BUTTON_SELECTOR).click()
+                outcome_task = asyncio.create_task(wait_for_submission_outcome(page))
                 await page.wait_for_timeout(RESULT_INSPECTION_DELAY_MS)
                 outcome = await outcome_task
 
