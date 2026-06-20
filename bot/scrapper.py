@@ -22,7 +22,7 @@ from .exceptions import (
     TrackingScraperError,
     TrackingNotFoundError,
 )
-from .models import CaptchaValidationArtifact, TrackingEvent, TrackingResult
+from .models import QueryValidationArtifact, TrackingEvent, TrackingResult
 from solver.paddle_ocr import PaddleCaptchaOcr
 
 
@@ -34,7 +34,6 @@ CAPTCHA_INPUT_SELECTOR = "#captcha"
 SEARCH_BUTTON_SELECTOR = "#b-pesquisar"
 FULL_RESULTS_SELECTOR = "#ver-rastro-unico"
 EVENT_SELECTOR = f"{FULL_RESULTS_SELECTOR} .ship-steps > li.step"
-RESULT_INSPECTION_DELAY_MS = 5_000
 SUBMISSION_TIMEOUT_MS = 15_000
 MAX_CAPTCHA_ATTEMPTS = 3
 CORREIOS_TIMEZONE = ZoneInfo("America/Sao_Paulo")
@@ -88,7 +87,7 @@ async def extract_event(event: Locator) -> TrackingEvent:
 async def extract_tracking_result(
     page: Page,
     tracking_code: str,
-    validation_artifact: CaptchaValidationArtifact,
+    validation_artifact: QueryValidationArtifact,
 ) -> TrackingResult:
     """Converte o HTML de resultado dos Correios em um modelo da API."""
     result = page.locator(FULL_RESULTS_SELECTOR)
@@ -156,23 +155,31 @@ async def wait_for_submission_outcome(page: Page) -> SubmissionOutcome:
 async def recognize_captcha(
     page: Page,
     recognizer: PaddleCaptchaOcr,
-) -> CaptchaValidationArtifact:
+) -> str:
     """Captura e reconhece o CAPTCHA exibido na pagina."""
     with TemporaryDirectory(prefix="tracking-captcha-") as temp_dir:
         captcha_path = Path(temp_dir) / "captcha.png"
         await page.locator(CAPTCHA_IMAGE_SELECTOR).screenshot(path=captcha_path)
         ocr_result = await asyncio.to_thread(recognizer.recognize, captcha_path)
-        image_base64 = base64.b64encode(captcha_path.read_bytes()).decode("ascii")
 
     captcha_text = "".join(character for character in ocr_result.text if character.isalnum())
     if not captcha_text:
         raise CaptchaRetriesExhaustedError("PaddleOCR não reconheceu o CAPTCHA")
 
-    return CaptchaValidationArtifact(
-        media_type="image/png",
-        image_base64=image_base64,
-        recognized_text=captcha_text,
-        confidence=ocr_result.confidence,
+    return captcha_text
+
+
+async def capture_query_artifact(page: Page) -> QueryValidationArtifact:
+    """Captura a tela com o resultado exibido para auditoria da consulta."""
+    await page.locator("#tabs-rastreamento").scroll_into_view_if_needed()
+    screenshot = await page.screenshot(
+        type="jpeg",
+        quality=80,
+        animations="disabled",
+    )
+    return QueryValidationArtifact(
+        media_type="image/jpeg",
+        image_base64=base64.b64encode(screenshot).decode("ascii"),
     )
 
 
@@ -183,10 +190,13 @@ def raise_for_outcome(outcome: SubmissionOutcome) -> None:
         raise TrackingNotFoundError(TRACKING_NOT_FOUND_MESSAGE)
 
 
-async def track_package(tracking_code: str) -> TrackingResult:
+async def track_package(
+    tracking_code: str,
+    recognizer: PaddleCaptchaOcr | None = None,
+) -> TrackingResult:
     """Consulta um objeto nos Correios e retorna seu historico estruturado."""
     try:
-        return await _track_package(tracking_code)
+        return await _track_package(tracking_code, recognizer)
     except TrackingScraperError:
         raise
     except PlaywrightError as error:
@@ -195,8 +205,11 @@ async def track_package(tracking_code: str) -> TrackingResult:
         ) from error
 
 
-async def _track_package(tracking_code: str) -> TrackingResult:
-    recognizer = await asyncio.to_thread(PaddleCaptchaOcr)
+async def _track_package(
+    tracking_code: str,
+    recognizer: PaddleCaptchaOcr | None,
+) -> TrackingResult:
+    recognizer = recognizer or await asyncio.to_thread(PaddleCaptchaOcr)
 
     async with FirefoxBrowser() as browser:
         async with browser.new_page() as page:
@@ -208,15 +221,15 @@ async def _track_package(tracking_code: str) -> TrackingResult:
 
             captcha_input = page.locator(CAPTCHA_INPUT_SELECTOR)
             for attempt in range(1, MAX_CAPTCHA_ATTEMPTS + 1):
-                validation_artifact = await recognize_captcha(page, recognizer)
-                await captcha_input.fill(validation_artifact.recognized_text)
+                recognized_captcha = await recognize_captcha(page, recognizer)
+                await captcha_input.fill(recognized_captcha)
 
                 await page.locator(SEARCH_BUTTON_SELECTOR).click()
                 outcome_task = asyncio.create_task(wait_for_submission_outcome(page))
-                await page.wait_for_timeout(RESULT_INSPECTION_DELAY_MS)
                 outcome = await outcome_task
 
                 if outcome is SubmissionOutcome.SUCCESS:
+                    validation_artifact = await capture_query_artifact(page)
                     return await extract_tracking_result(
                         page,
                         tracking_code,

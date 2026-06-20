@@ -1,0 +1,32 @@
+services:
+  tracking-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      BROWSER_HEADLESS: "true"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    cpus: 1.0
+    mem_limit: 512m
+    shm_size: 128m
+    init: true
+    restart: unless-stopped
+    volumes:
+      - paddle-models:/home/pwuser/.paddlex
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  paddle-models:

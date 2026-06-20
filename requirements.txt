@@ -1,5 +1,5 @@
 -r solver/requirements_ocr.txt
 
-fastapi
-uvicorn[standard]
-playwright
+fastapi>=0.138.0,<1.0.0
+uvicorn[standard]>=0.49.0,<1.0.0
+playwright==1.60.0

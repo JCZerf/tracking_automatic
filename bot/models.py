@@ -7,6 +7,11 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 
+class ErrorResponse(BaseModel):
+    code: str
+    message: str
+
+
 class TrackingEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -15,13 +20,11 @@ class TrackingEvent(BaseModel):
     occurred_at: datetime
 
 
-class CaptchaValidationArtifact(BaseModel):
+class QueryValidationArtifact(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     media_type: str
     image_base64: str
-    recognized_text: str
-    confidence: float
 
 
 class TrackingResult(BaseModel):
@@ -31,4 +34,4 @@ class TrackingResult(BaseModel):
     service: str
     current_status: str
     events: tuple[TrackingEvent, ...]
-    validation_artifact: CaptchaValidationArtifact
+    validation_artifact: QueryValidationArtifact

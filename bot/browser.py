@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import os
 from typing import AsyncIterator
 
 from playwright.async_api import (
@@ -20,19 +21,28 @@ from playwright.async_api import (
 class BrowserSettings:
     """Configuracoes de inicializacao e navegacao do Firefox."""
 
-    headless: bool = False
+    headless: bool = True
     navigation_timeout_ms: int = 30_000
     locale: str = "pt-BR"
     timezone_id: str = "America/Sao_Paulo"
     viewport_width: int = 1366
     viewport_height: int = 768
 
+    @classmethod
+    def from_environment(cls) -> BrowserSettings:
+        headless = os.getenv("BROWSER_HEADLESS", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        return cls(headless=headless)
+
 
 class FirefoxBrowser:
     """Mantem um Firefox aberto e cria sessoes isoladas para o bot."""
 
     def __init__(self, settings: BrowserSettings | None = None) -> None:
-        self._settings = settings or BrowserSettings()
+        self._settings = settings or BrowserSettings.from_environment()
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._lifecycle_lock = asyncio.Lock()
