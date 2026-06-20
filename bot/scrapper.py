@@ -25,22 +25,6 @@ from .exceptions import (
 from .models import TrackingEvent, TrackingResult
 from solver.paddle_ocr import PaddleCaptchaOcr
 
-
-TRACKING_URL = "https://rastreamento.correios.com.br/app/index.php"
-TRACKING_CODE = "TJ 481 246 775 BR"
-MAX_CAPTCHA_ATTEMPTS = 3
-REQUEST_TIMEOUT_SECONDS = 30
-INVALID_TRACKING_CODE_MESSAGE = "Código de objeto, CPF ou CNPJ informado não está válido"
-INVALID_CAPTCHA_MESSAGE = "Captcha inválido"
-HTTP_HEADERS = {
-    "Accept-Language": "pt-BR,pt;q=0.9",
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) "
-        "Gecko/20100101 Firefox/146.0"
-    ),
-}
-
-
 def normalize_tracking_code(tracking_code: str) -> str:
     return "".join(character for character in tracking_code if character.isalnum()).upper()
 
@@ -154,18 +138,31 @@ async def track_package(
     recognizer: PaddleCaptchaOcr | None = None,
 ) -> TrackingResult:
     """Consulta um objeto e retorna seu historico estruturado."""
+    tracking_url = "https://rastreamento.correios.com.br/app/index.php"
+    invalid_tracking_code_message = "Código de objeto, CPF ou CNPJ informado não está válido"
+    invalid_captcha_message = "Captcha inválido"
+    max_captcha_attempts = 3
+    request_timeout_seconds = 30
+    http_headers = {
+        "Accept-Language": "pt-BR,pt;q=0.9",
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) "
+            "Gecko/20100101 Firefox/146.0"
+        ),
+    }
+
     normalized_code = normalize_tracking_code(tracking_code)
     if not normalized_code:
-        raise InvalidTrackingCodeError(INVALID_TRACKING_CODE_MESSAGE)
+        raise InvalidTrackingCodeError(invalid_tracking_code_message)
 
     recognizer = recognizer or await asyncio.to_thread(PaddleCaptchaOcr)
     try:
         async with httpx.AsyncClient(
-            headers=HTTP_HEADERS,
+            headers=http_headers,
             follow_redirects=True,
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=request_timeout_seconds,
         ) as client:
-            index_response = await client.get(TRACKING_URL)
+            index_response = await client.get(tracking_url)
             index_response.raise_for_status()
             captcha_element = BeautifulSoup(index_response.text, "html.parser").select_one(
                 "#captcha_image"
@@ -176,7 +173,7 @@ async def track_package(
             captcha_url = urljoin(str(index_response.url), str(captcha_element["src"]))
             result_url = urljoin(str(index_response.url), "resultado.php")
 
-            for _attempt in range(MAX_CAPTCHA_ATTEMPTS):
+            for _attempt in range(max_captcha_attempts):
                 captcha_text = await recognize_captcha(client, captcha_url, recognizer)
                 if not captcha_text:
                     continue
@@ -187,7 +184,7 @@ async def track_package(
                 result_response.raise_for_status()
                 payload = result_response.json()
 
-                if payload.get("mensagem") == INVALID_CAPTCHA_MESSAGE:
+                if payload.get("mensagem") == invalid_captcha_message:
                     continue
                 if payload.get("erro"):
                     raise_response_error(payload)
@@ -201,14 +198,11 @@ async def track_package(
         ) from error
 
     raise CaptchaRetriesExhaustedError(
-        f"Captcha inválido após {MAX_CAPTCHA_ATTEMPTS} tentativas"
+        f"Captcha inválido após {max_captcha_attempts} tentativas"
     )
 
 
-async def main() -> None:
-    result = await track_package(TRACKING_CODE)
-    print(result.model_dump_json(indent=2))
-
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(
+        "Este arquivo não deve ser executado diretamente. Use a API ou chame track_package() com um código válido."
+    )
