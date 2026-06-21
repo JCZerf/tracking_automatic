@@ -37,7 +37,7 @@ class TrackingServiceCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(second, expected_response)
         track_package.assert_awaited_once()
 
-    async def test_refreshes_expired_entry(self) -> None:
+    async def test_reloads_expired_entry(self) -> None:
         first_response = build_response()
         second_response = build_response()
         service = TrackingService(object(), cache_ttl_seconds=300)
@@ -53,9 +53,9 @@ class TrackingServiceCacheTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             await service.track("TJ481246775BR")
-            refreshed = await service.track("TJ481246775BR")
+            reloaded = await service.track("TJ481246775BR")
 
-        self.assertIs(refreshed, second_response)
+        self.assertIs(reloaded, second_response)
         self.assertEqual(track_package.await_count, 2)
 
     async def test_does_not_cache_errors(self) -> None:
@@ -77,7 +77,6 @@ class TrackingServiceCacheTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(response, expected_response)
         self.assertEqual(track_package.await_count, 2)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -273,7 +273,7 @@ uvicorn main:app --reload
 
 ## Cache e rate limiting
 
-Respostas bem-sucedidas são armazenadas em um cache LRU em memória. Uma entrada expira após o TTL configurado, e erros nunca são armazenados. O serviço verifica o cache antes e depois de adquirir o lock do OCR, evitando processamento duplicado quando consultas iguais chegam simultaneamente.
+Respostas bem-sucedidas são armazenadas em um cache LRU em memória por, no máximo, 5 minutos na configuração padrão. Erros nunca são armazenados. O serviço verifica o cache antes e depois de adquirir o lock do OCR, evitando processamento duplicado quando consultas iguais chegam simultaneamente.
 
 A rota `/tracking` utiliza uma janela deslizante por endereço do cliente. Ao exceder o limite, a API responde com status `429`, código `RATE_LIMIT_EXCEEDED` e cabeçalho `Retry-After`.
 

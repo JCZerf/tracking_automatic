@@ -27,7 +27,12 @@ from .exceptions import (
     TrackingScraperError,
     UnsupportedDocumentError,
 )
-from .models import TrackingEvent, TrackingResponse, TrackingResult
+from .models import (
+    TrackingEvent,
+    TrackingNotFoundResult,
+    TrackingResponse,
+    TrackingResult,
+)
 from solver.paddle_ocr import PaddleCaptchaOcr
 
 
@@ -35,6 +40,7 @@ logger = logging.getLogger("tracking_automatic.bot")
 DOCUMENT_LENGTHS = {11, 14}
 MAX_TRACKING_CODES = 20
 TRACKING_CODE_PATTERN = re.compile(r"^[A-Z]{2}\d{9}[A-Z]{2}$")
+S10_WEIGHTS = (8, 6, 4, 2, 3, 5, 9, 7)
 
 
 def normalize_tracking_code(tracking_code: str) -> str:
@@ -48,6 +54,23 @@ def is_cpf_or_cnpj(value: str) -> bool:
         character.isdigit() or character in "./-" for character in compact_value
     )
     return contains_only_document_characters and len(digits) in DOCUMENT_LENGTHS
+
+
+def has_valid_s10_check_digit(tracking_code: str) -> bool:
+    if not TRACKING_CODE_PATTERN.fullmatch(tracking_code):
+        return False
+
+    serial_digits = (int(digit) for digit in tracking_code[2:10])
+    remainder = sum(
+        digit * weight for digit, weight in zip(serial_digits, S10_WEIGHTS)
+    ) % 11
+    check_digit = 11 - remainder
+    if check_digit == 10:
+        check_digit = 0
+    elif check_digit == 11:
+        check_digit = 5
+
+    return int(tracking_code[10]) == check_digit
 
 
 def parse_tracking_codes(value: str) -> tuple[str, ...]:
@@ -67,9 +90,9 @@ def parse_tracking_codes(value: str) -> tuple[str, ...]:
             "Não é possível consultar com CPF ou CNPJ. "
             "Informe apenas códigos de rastreamento."
         )
-    if any(not TRACKING_CODE_PATTERN.fullmatch(code) for code in normalized_codes):
+    if any(not has_valid_s10_check_digit(code) for code in normalized_codes):
         raise InvalidTrackingCodeError(
-            "Informe códigos de rastreamento válidos separados por vírgula"
+            "Código de objeto, CPF ou CNPJ informado não está válido"
         )
     if len(set(normalized_codes)) != len(normalized_codes):
         raise InvalidTrackingCodeError("Não repita códigos na mesma consulta")
@@ -151,8 +174,8 @@ def parse_tracking_result(payload: dict[str, Any]) -> TrackingResult:
 def parse_multiple_tracking_results(
     payload: dict[str, Any],
     requested_codes: tuple[str, ...],
-) -> tuple[TrackingResult, ...]:
-    objects_by_code: dict[str, dict[str, Any]] = {}
+) -> tuple[TrackingResult | TrackingNotFoundResult, ...]:
+    results_by_code: dict[str, TrackingResult | TrackingNotFoundResult] = {}
 
     for group in payload.values():
         if not isinstance(group, list):
@@ -161,23 +184,31 @@ def parse_multiple_tracking_results(
             if not isinstance(item, dict):
                 continue
             tracking_object = item.get("objeto")
-            if not isinstance(tracking_object, dict):
+            if isinstance(tracking_object, dict):
+                tracking_code = normalize_tracking_code(
+                    str(tracking_object.get("codObjeto") or "")
+                )
+                if tracking_code:
+                    results_by_code[tracking_code] = parse_tracking_result(
+                        tracking_object
+                    )
                 continue
-            tracking_code = normalize_tracking_code(
-                str(tracking_object.get("codObjeto") or "")
-            )
-            if tracking_code:
-                objects_by_code[tracking_code] = tracking_object
 
-    missing_codes = [code for code in requested_codes if code not in objects_by_code]
+            tracking_code = normalize_tracking_code(str(item.get("cod_objeto") or ""))
+            message = item.get("mensagem_h") or item.get("mensagem")
+            if tracking_code and isinstance(message, str) and message:
+                results_by_code[tracking_code] = TrackingNotFoundResult(
+                    tracking_code=tracking_code,
+                    message=message,
+                )
+
+    missing_codes = [code for code in requested_codes if code not in results_by_code]
     if missing_codes:
-        raise TrackingNotFoundError(
-            "Um ou mais objetos não foram encontrados"
+        raise CorreiosUnavailableError(
+            "Os Correios não retornaram todos os objetos solicitados"
         )
 
-    return tuple(
-        parse_tracking_result(objects_by_code[code]) for code in requested_codes
-    )
+    return tuple(results_by_code[code] for code in requested_codes)
 
 
 async def recognize_captcha(

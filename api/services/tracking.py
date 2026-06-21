@@ -39,7 +39,10 @@ class TrackingService:
         cache_key = self._build_cache_key(tracking_code)
         cached_response = self._get_cached(cache_key)
         if cached_response is not None:
-            logger.info("tracking_cache_hit objects=%d", len(cached_response.results))
+            logger.info(
+                "tracking_cache_hit objects=%d",
+                len(cached_response.results),
+            )
             return cached_response
 
         async with self._lock:
