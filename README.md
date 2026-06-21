@@ -54,7 +54,7 @@ flowchart LR
 | --- | --- | --- |
 | Entrada ASGI | `main.py` | Cria e expõe a aplicação para o servidor ASGI. |
 | Apresentação | `api/routes/` | Define endpoints, parâmetros, modelos de resposta e documentação OpenAPI. |
-| Aplicação | `api/services/` | Orquestra o caso de uso e controla o acesso concorrente ao OCR. |
+| Aplicação | `api/services/` | Orquestra o caso de uso, mantém o cache e controla o acesso concorrente ao OCR. |
 | Integração | `bot/scrapper.py` | Mantém a sessão HTTP, resolve o desafio e transforma a resposta externa. |
 | Domínio | `bot/models.py` e `bot/exceptions.py` | Define contratos imutáveis e falhas conhecidas do rastreamento. |
 | Infraestrutura | `solver/paddle_ocr.py` | Encapsula a inicialização e a inferência do PaddleOCR. |
@@ -203,6 +203,7 @@ As falhas conhecidas seguem o contrato:
 | `422` | `INVALID_TRACKING_CODE` | O código informado foi rejeitado. |
 | `422` | `DOCUMENT_NOT_SUPPORTED` | A entrada possui formato de CPF ou CNPJ; somente códigos de rastreamento são aceitos. |
 | `422` | `TRACKING_LIMIT_EXCEEDED` | Foram enviados mais de 20 códigos na mesma consulta. |
+| `429` | `RATE_LIMIT_EXCEEDED` | O cliente excedeu o número de consultas permitido na janela. |
 | `502` | `CAPTCHA_RETRIES_EXHAUSTED` | As tentativas de reconhecimento foram esgotadas. |
 | `502` | `CORREIOS_UNAVAILABLE` | Houve falha na comunicação ou na interpretação da resposta externa. |
 
@@ -210,7 +211,7 @@ A especificação OpenAPI e a interface Swagger ficam disponíveis em `/docs`. A
 
 ## Testes automatizados
 
-Os testes unitários cobrem validação de entradas, limite de objetos, CPF/CNPJ, duplicidades e transformação ordenada da resposta múltipla.
+Os testes unitários cobrem validação de entradas, limite de objetos, CPF/CNPJ, duplicidades, transformação da resposta múltipla, cache, expiração e rate limiting.
 
 ```powershell
 python -m unittest discover -v
@@ -255,14 +256,28 @@ Endereços locais:
 | --- | --- | --- | --- |
 | `CORS_ORIGINS` | Não | origens locais e frontend publicado | Lista de origens permitidas, separadas por vírgula e sem caminhos. |
 | `LOG_LEVEL` | Não | `INFO` | Nível dos logs da aplicação (`DEBUG`, `INFO`, `WARNING`, `ERROR` ou `CRITICAL`). |
+| `CACHE_TTL_SECONDS` | Não | `300` | Tempo de vida dos resultados em cache; `0` desativa o cache. |
+| `CACHE_MAX_ENTRIES` | Não | `100` | Quantidade máxima de consultas mantidas no cache LRU. |
+| `RATE_LIMIT_REQUESTS` | Não | `10` | Requisições permitidas por cliente na janela; `0` desativa o limite. |
+| `RATE_LIMIT_WINDOW_SECONDS` | Não | `60` | Duração da janela deslizante do rate limiting. |
 
 Exemplo para desenvolvimento:
 
 ```powershell
 $env:CORS_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
 $env:LOG_LEVEL="INFO"
+$env:CACHE_TTL_SECONDS="300"
+$env:RATE_LIMIT_REQUESTS="10"
 uvicorn main:app --reload
 ```
+
+## Cache e rate limiting
+
+Respostas bem-sucedidas são armazenadas em um cache LRU em memória. Uma entrada expira após o TTL configurado, e erros nunca são armazenados. O serviço verifica o cache antes e depois de adquirir o lock do OCR, evitando processamento duplicado quando consultas iguais chegam simultaneamente.
+
+A rota `/tracking` utiliza uma janela deslizante por endereço do cliente. Ao exceder o limite, a API responde com status `429`, código `RATE_LIMIT_EXCEEDED` e cabeçalho `Retry-After`.
+
+As duas estratégias mantêm estado no processo da aplicação. Isso é adequado ao worker único atual. Em uma implantação com múltiplos workers ou réplicas, o estado deve ser movido para um serviço compartilhado, como Redis.
 
 ## Logs operacionais
 
@@ -318,11 +333,11 @@ O container expõe a porta `8000` e inicia um único worker. Em plataformas que 
 - a solução depende da estrutura HTML e do contrato de resposta dos Correios;
 - a precisão da consulta depende do reconhecimento correto do CAPTCHA;
 - cada instância processa uma consulta por vez devido ao lock do OCR;
-- não há cache de resultados nem limitação de requisições por cliente;
-- ainda não existem métricas, tracing ou logs estruturados;
+- cache e rate limiting são locais ao processo e não são compartilhados entre réplicas;
+- ainda não existe um backend dedicado para métricas e tracing;
 - a validação local bloqueia CPF, CNPJ, duplicidades, formatos inválidos e consultas acima de 20 objetos.
 
-Evoluções previstas incluem testes unitários e de integração, observabilidade, cache com expiração, rate limiting e processamento do OCR em workers dedicados.
+Evoluções previstas incluem testes de integração, métricas agregadas, tracing e armazenamento compartilhado para cenários com múltiplas réplicas.
 
 ## Frontend
 

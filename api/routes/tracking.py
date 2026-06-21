@@ -2,9 +2,10 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from bot.models import ErrorResponse, TrackingResponse
+from ..rate_limit import enforce_rate_limit
 from ..services.tracking import TrackingService
 
 
@@ -14,9 +15,11 @@ router = APIRouter(prefix="/tracking", tags=["tracking"])
 @router.get(
     "",
     response_model=TrackingResponse,
+    dependencies=[Depends(enforce_rate_limit)],
     responses={
         404: {"model": ErrorResponse, "description": "Objeto não encontrado"},
         422: {"model": ErrorResponse, "description": "Código inválido"},
+        429: {"model": ErrorResponse, "description": "Limite excedido"},
         502: {"model": ErrorResponse, "description": "Falha nos Correios ou no CAPTCHA"},
     },
 )

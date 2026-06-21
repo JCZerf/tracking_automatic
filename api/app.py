@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from .exception_handlers import register_exception_handlers
+from .rate_limit import InMemoryRateLimiter
 from .routes.tracking import router as tracking_router
 from .services.tracking import TrackingService
 from solver.paddle_ocr import PaddleCaptchaOcr
@@ -57,6 +58,22 @@ def get_cors_origins() -> list[str]:
     ]
 
 
+def get_integer_setting(name: str, default: int, minimum: int = 0) -> int:
+    configured_value = os.getenv(name)
+    if configured_value is None:
+        return default
+
+    try:
+        return max(minimum, int(configured_value))
+    except ValueError:
+        logger.warning(
+            "invalid_integer_setting name=%s fallback=%d",
+            name,
+            default,
+        )
+        return default
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     started_at = time.perf_counter()
@@ -67,7 +84,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("ocr_initialization_failed")
         raise
 
-    app.state.tracking_service = TrackingService(recognizer)
+    app.state.tracking_service = TrackingService(
+        recognizer,
+        cache_ttl_seconds=get_integer_setting("CACHE_TTL_SECONDS", 300),
+        cache_max_entries=get_integer_setting("CACHE_MAX_ENTRIES", 100, minimum=1),
+    )
+    app.state.rate_limiter = InMemoryRateLimiter(
+        max_requests=get_integer_setting("RATE_LIMIT_REQUESTS", 10),
+        window_seconds=get_integer_setting(
+            "RATE_LIMIT_WINDOW_SECONDS",
+            60,
+            minimum=1,
+        ),
+    )
     logger.info(
         "application_started ocr_initialization_seconds=%.2f",
         time.perf_counter() - started_at,
@@ -78,6 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         logger.info("application_shutdown_started")
         del app.state.tracking_service
+        del app.state.rate_limiter
         logger.info("application_shutdown_completed")
 
 
