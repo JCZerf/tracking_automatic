@@ -27,3 +27,9 @@ class TrackingResult(BaseModel):
     service: str
     current_status: str
     events: tuple[TrackingEvent, ...]
+
+
+class TrackingResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    results: tuple[TrackingResult, ...]

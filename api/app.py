@@ -1,7 +1,9 @@
 """Configuracao da aplicacao FastAPI."""
 
 import asyncio
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -20,6 +22,27 @@ DEFAULT_CORS_ORIGINS = (
     "http://127.0.0.1:5173",
     "https://tracking-automatic-web.vercel.app",
 )
+LOGGER_NAME = "tracking_automatic"
+logger = logging.getLogger(f"{LOGGER_NAME}.app")
+
+
+def configure_logging() -> None:
+    """Configura apenas os logs da aplicacao, sem alterar bibliotecas externas."""
+    application_logger = logging.getLogger(LOGGER_NAME)
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    if not isinstance(level, int):
+        level = logging.INFO
+
+    if not application_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        application_logger.addHandler(handler)
+
+    application_logger.setLevel(level)
+    application_logger.propagate = False
 
 
 def get_cors_origins() -> list[str]:
@@ -36,13 +59,30 @@ def get_cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    recognizer = await asyncio.to_thread(PaddleCaptchaOcr)
+    started_at = time.perf_counter()
+    logger.info("ocr_initialization_started")
+    try:
+        recognizer = await asyncio.to_thread(PaddleCaptchaOcr)
+    except Exception:
+        logger.exception("ocr_initialization_failed")
+        raise
+
     app.state.tracking_service = TrackingService(recognizer)
-    yield
-    del app.state.tracking_service
+    logger.info(
+        "application_started ocr_initialization_seconds=%.2f",
+        time.perf_counter() - started_at,
+    )
+
+    try:
+        yield
+    finally:
+        logger.info("application_shutdown_started")
+        del app.state.tracking_service
+        logger.info("application_shutdown_completed")
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(
         title="Tracking API",
         version="1.0.0",

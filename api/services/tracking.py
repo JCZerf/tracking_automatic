@@ -2,7 +2,7 @@
 
 import asyncio
 
-from bot.models import TrackingResult
+from bot.models import TrackingResponse
 from bot.scrapper import track_package
 from solver.paddle_ocr import PaddleCaptchaOcr
 
@@ -14,6 +14,6 @@ class TrackingService:
         self._recognizer = recognizer
         self._lock = asyncio.Lock()
 
-    async def track(self, tracking_code: str) -> TrackingResult:
+    async def track(self, tracking_code: str) -> TrackingResponse:
         async with self._lock:
             return await track_package(tracking_code, self._recognizer)

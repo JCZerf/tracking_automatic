@@ -22,6 +22,16 @@ class InvalidTrackingCodeError(TrackingScraperError):
     status_code = 422
 
 
+class UnsupportedDocumentError(TrackingScraperError):
+    error_code = "DOCUMENT_NOT_SUPPORTED"
+    status_code = 422
+
+
+class TrackingLimitExceededError(TrackingScraperError):
+    error_code = "TRACKING_LIMIT_EXCEEDED"
+    status_code = 422
+
+
 class TrackingNotFoundError(TrackingScraperError):
     error_code = "TRACKING_NOT_FOUND"
     status_code = 404
