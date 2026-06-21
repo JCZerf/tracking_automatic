@@ -128,6 +128,7 @@ Essa decisão privilegia previsibilidade de recursos em uma implantação pequen
 O scraper realiza as seguintes transformações antes de construir a resposta:
 
 - separa os códigos por vírgula, remove espaços e padroniza letras maiúsculas;
+- valida o formato e o dígito verificador S10 de todos os códigos;
 - converte o código para letras maiúsculas;
 - combina tipo, logradouro, número, bairro, cidade e UF das unidades postais;
 - diferencia unidade de origem e destino;
@@ -163,6 +164,7 @@ Exemplo de resposta bem-sucedida:
 {
   "results": [
     {
+      "status": "success",
       "tracking_code": "TJ481246775BR",
       "service": "SEDEX",
       "current_status": "Objeto entregue ao destinatário",
@@ -175,16 +177,17 @@ Exemplo de resposta bem-sucedida:
       ]
     },
     {
-      "tracking_code": "AP073539958BR",
-      "service": "ENCOMENDA PAC",
-      "current_status": "Objeto em transferência - por favor aguarde",
-      "events": []
+      "status": "not_found",
+      "tracking_code": "ZZ000000005BR",
+      "message": "Objeto não encontrado na base de dados dos Correios."
     }
   ]
 }
 ```
 
 O contrato é o mesmo para consultas individuais e múltiplas. Uma consulta individual retorna `results` com um elemento.
+
+Cada item utiliza o campo discriminador `status`. Itens `success` possuem serviço, status atual e eventos. Em consultas múltiplas, um código S10 válido que não exista na base é mantido como `not_found`, sem remover os resultados encontrados. Se qualquer código possuir formato ou dígito verificador inválido, toda a consulta é rejeitada com `422` antes do acesso aos Correios.
 
 ### Respostas de erro
 
@@ -211,7 +214,7 @@ A especificação OpenAPI e a interface Swagger ficam disponíveis em `/docs`. A
 
 ## Testes automatizados
 
-Os testes unitários cobrem validação de entradas, limite de objetos, CPF/CNPJ, duplicidades, transformação da resposta múltipla, cache, expiração e rate limiting.
+Os testes unitários cobrem validação S10, limite de objetos, CPF/CNPJ, duplicidades, falhas parciais, transformação da resposta múltipla, cache, expiração e rate limiting.
 
 ```powershell
 python -m unittest discover -v

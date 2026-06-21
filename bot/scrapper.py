@@ -332,10 +332,18 @@ async def track_package(
                 )
                 response = TrackingResponse(results=results)
                 logger.info(
-                    "tracking_completed request_id=%s objects=%d events=%d duration_seconds=%.2f",
+                    "tracking_completed request_id=%s objects=%d not_found=%d events=%d duration_seconds=%.2f",
                     request_id,
                     len(results),
-                    sum(len(result.events) for result in results),
+                    sum(
+                        isinstance(result, TrackingNotFoundResult)
+                        for result in results
+                    ),
+                    sum(
+                        len(result.events)
+                        for result in results
+                        if isinstance(result, TrackingResult)
+                    ),
                     time.perf_counter() - started_at,
                 )
                 return response
