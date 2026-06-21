@@ -1,7 +1,9 @@
 """Configuracao da aplicacao FastAPI."""
 
 import asyncio
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -10,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from .exception_handlers import register_exception_handlers
+from .rate_limit import InMemoryRateLimiter
 from .routes.tracking import router as tracking_router
 from .services.tracking import TrackingService
 from solver.paddle_ocr import PaddleCaptchaOcr
@@ -20,6 +23,27 @@ DEFAULT_CORS_ORIGINS = (
     "http://127.0.0.1:5173",
     "https://tracking-automatic-web.vercel.app",
 )
+LOGGER_NAME = "tracking_automatic"
+logger = logging.getLogger(f"{LOGGER_NAME}.app")
+
+
+def configure_logging() -> None:
+    """Configura apenas os logs da aplicacao, sem alterar bibliotecas externas."""
+    application_logger = logging.getLogger(LOGGER_NAME)
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    if not isinstance(level, int):
+        level = logging.INFO
+
+    if not application_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        application_logger.addHandler(handler)
+
+    application_logger.setLevel(level)
+    application_logger.propagate = False
 
 
 def get_cors_origins() -> list[str]:
@@ -34,15 +58,61 @@ def get_cors_origins() -> list[str]:
     ]
 
 
+def get_integer_setting(name: str, default: int, minimum: int = 0) -> int:
+    configured_value = os.getenv(name)
+    if configured_value is None:
+        return default
+
+    try:
+        return max(minimum, int(configured_value))
+    except ValueError:
+        logger.warning(
+            "invalid_integer_setting name=%s fallback=%d",
+            name,
+            default,
+        )
+        return default
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    recognizer = await asyncio.to_thread(PaddleCaptchaOcr)
-    app.state.tracking_service = TrackingService(recognizer)
-    yield
-    del app.state.tracking_service
+    started_at = time.perf_counter()
+    logger.info("ocr_initialization_started")
+    try:
+        recognizer = await asyncio.to_thread(PaddleCaptchaOcr)
+    except Exception:
+        logger.exception("ocr_initialization_failed")
+        raise
+
+    app.state.tracking_service = TrackingService(
+        recognizer,
+        cache_ttl_seconds=get_integer_setting("CACHE_TTL_SECONDS", 300),
+        cache_max_entries=get_integer_setting("CACHE_MAX_ENTRIES", 100, minimum=1),
+    )
+    app.state.rate_limiter = InMemoryRateLimiter(
+        max_requests=get_integer_setting("RATE_LIMIT_REQUESTS", 10),
+        window_seconds=get_integer_setting(
+            "RATE_LIMIT_WINDOW_SECONDS",
+            60,
+            minimum=1,
+        ),
+    )
+    logger.info(
+        "application_started ocr_initialization_seconds=%.2f",
+        time.perf_counter() - started_at,
+    )
+
+    try:
+        yield
+    finally:
+        logger.info("application_shutdown_started")
+        del app.state.tracking_service
+        del app.state.rate_limiter
+        logger.info("application_shutdown_completed")
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(
         title="Tracking API",
         version="1.0.0",

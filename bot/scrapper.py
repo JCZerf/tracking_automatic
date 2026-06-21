@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -19,14 +22,82 @@ from .exceptions import (
     CaptchaRetriesExhaustedError,
     CorreiosUnavailableError,
     InvalidTrackingCodeError,
+    TrackingLimitExceededError,
     TrackingNotFoundError,
     TrackingScraperError,
+    UnsupportedDocumentError,
 )
-from .models import TrackingEvent, TrackingResult
+from .models import (
+    TrackingEvent,
+    TrackingNotFoundResult,
+    TrackingResponse,
+    TrackingResult,
+)
 from solver.paddle_ocr import PaddleCaptchaOcr
+
+
+logger = logging.getLogger("tracking_automatic.bot")
+DOCUMENT_LENGTHS = {11, 14}
+MAX_TRACKING_CODES = 20
+TRACKING_CODE_PATTERN = re.compile(r"^[A-Z]{2}\d{9}[A-Z]{2}$")
+S10_WEIGHTS = (8, 6, 4, 2, 3, 5, 9, 7)
+
 
 def normalize_tracking_code(tracking_code: str) -> str:
     return "".join(character for character in tracking_code if character.isalnum()).upper()
+
+
+def is_cpf_or_cnpj(value: str) -> bool:
+    compact_value = "".join(value.split())
+    digits = "".join(character for character in compact_value if character.isdigit())
+    contains_only_document_characters = all(
+        character.isdigit() or character in "./-" for character in compact_value
+    )
+    return contains_only_document_characters and len(digits) in DOCUMENT_LENGTHS
+
+
+def has_valid_s10_check_digit(tracking_code: str) -> bool:
+    if not TRACKING_CODE_PATTERN.fullmatch(tracking_code):
+        return False
+
+    serial_digits = (int(digit) for digit in tracking_code[2:10])
+    remainder = sum(
+        digit * weight for digit, weight in zip(serial_digits, S10_WEIGHTS)
+    ) % 11
+    check_digit = 11 - remainder
+    if check_digit == 10:
+        check_digit = 0
+    elif check_digit == 11:
+        check_digit = 5
+
+    return int(tracking_code[10]) == check_digit
+
+
+def parse_tracking_codes(value: str) -> tuple[str, ...]:
+    raw_codes = value.split(",")
+    normalized_codes = tuple(
+        "".join(code.split()).upper() for code in raw_codes
+    )
+
+    if not normalized_codes or any(not code for code in normalized_codes):
+        raise InvalidTrackingCodeError("Informe ao menos um código de rastreamento válido")
+    if len(normalized_codes) > MAX_TRACKING_CODES:
+        raise TrackingLimitExceededError(
+            f"Informe no máximo {MAX_TRACKING_CODES} códigos de rastreamento por consulta"
+        )
+    if any(is_cpf_or_cnpj(code) for code in raw_codes):
+        raise UnsupportedDocumentError(
+            "Não é possível consultar com CPF ou CNPJ. "
+            "Informe apenas códigos de rastreamento."
+        )
+    if any(not has_valid_s10_check_digit(code) for code in normalized_codes):
+        raise InvalidTrackingCodeError(
+            "Código de objeto, CPF ou CNPJ informado não está válido"
+        )
+    if len(set(normalized_codes)) != len(normalized_codes):
+        raise InvalidTrackingCodeError("Não repita códigos na mesma consulta")
+
+    return normalized_codes
 
 
 def format_address(address: dict[str, Any]) -> str:
@@ -100,6 +171,46 @@ def parse_tracking_result(payload: dict[str, Any]) -> TrackingResult:
     )
 
 
+def parse_multiple_tracking_results(
+    payload: dict[str, Any],
+    requested_codes: tuple[str, ...],
+) -> tuple[TrackingResult | TrackingNotFoundResult, ...]:
+    results_by_code: dict[str, TrackingResult | TrackingNotFoundResult] = {}
+
+    for group in payload.values():
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            tracking_object = item.get("objeto")
+            if isinstance(tracking_object, dict):
+                tracking_code = normalize_tracking_code(
+                    str(tracking_object.get("codObjeto") or "")
+                )
+                if tracking_code:
+                    results_by_code[tracking_code] = parse_tracking_result(
+                        tracking_object
+                    )
+                continue
+
+            tracking_code = normalize_tracking_code(str(item.get("cod_objeto") or ""))
+            message = item.get("mensagem_h") or item.get("mensagem")
+            if tracking_code and isinstance(message, str) and message:
+                results_by_code[tracking_code] = TrackingNotFoundResult(
+                    tracking_code=tracking_code,
+                    message=message,
+                )
+
+    missing_codes = [code for code in requested_codes if code not in results_by_code]
+    if missing_codes:
+        raise CorreiosUnavailableError(
+            "Os Correios não retornaram todos os objetos solicitados"
+        )
+
+    return tuple(results_by_code[code] for code in requested_codes)
+
+
 async def recognize_captcha(
     client: httpx.AsyncClient,
     captcha_url: str,
@@ -136,10 +247,13 @@ def raise_response_error(payload: dict[str, Any]) -> None:
 async def track_package(
     tracking_code: str,
     recognizer: PaddleCaptchaOcr | None = None,
-) -> TrackingResult:
-    """Consulta um objeto e retorna seu historico estruturado."""
+) -> TrackingResponse:
+    """Consulta ate vinte objetos e retorna seus historicos estruturados."""
+    request_id = uuid4().hex[:8]
+    started_at = time.perf_counter()
+    logger.info("tracking_started request_id=%s", request_id)
+
     tracking_url = "https://rastreamento.correios.com.br/app/index.php"
-    invalid_tracking_code_message = "Código de objeto, CPF ou CNPJ informado não está válido"
     invalid_captcha_message = "Captcha inválido"
     max_captcha_attempts = 3
     request_timeout_seconds = 30
@@ -151,12 +265,10 @@ async def track_package(
         ),
     }
 
-    normalized_code = normalize_tracking_code(tracking_code)
-    if not normalized_code:
-        raise InvalidTrackingCodeError(invalid_tracking_code_message)
-
-    recognizer = recognizer or await asyncio.to_thread(PaddleCaptchaOcr)
     try:
+        tracking_codes = parse_tracking_codes(tracking_code)
+        is_multiple = len(tracking_codes) > 1
+        recognizer = recognizer or await asyncio.to_thread(PaddleCaptchaOcr)
         async with httpx.AsyncClient(
             headers=http_headers,
             follow_redirects=True,
@@ -171,32 +283,102 @@ async def track_package(
                 raise CorreiosUnavailableError("CAPTCHA não encontrado na página dos Correios")
 
             captcha_url = urljoin(str(index_response.url), str(captcha_element["src"]))
-            result_url = urljoin(str(index_response.url), "resultado.php")
+            result_url = urljoin(
+                str(index_response.url),
+                "rastroMulti.php" if is_multiple else "resultado.php",
+            )
 
-            for _attempt in range(max_captcha_attempts):
+            for attempt in range(1, max_captcha_attempts + 1):
                 captcha_text = await recognize_captcha(client, captcha_url, recognizer)
                 if not captcha_text:
+                    logger.warning(
+                        "captcha_recognition_empty request_id=%s attempt=%d max_attempts=%d",
+                        request_id,
+                        attempt,
+                        max_captcha_attempts,
+                    )
                     continue
-                result_response = await client.get(
-                    result_url,
-                    params={"objeto": normalized_code, "captcha": captcha_text, "mqs": "S"},
-                )
+                request_params = {
+                    "objeto": "".join(tracking_codes),
+                    "captcha": captcha_text,
+                }
+                if not is_multiple:
+                    request_params["mqs"] = "S"
+
+                result_response = await client.get(result_url, params=request_params)
                 result_response.raise_for_status()
                 payload = result_response.json()
 
+                if not isinstance(payload, dict):
+                    raise CorreiosUnavailableError(
+                        "Os Correios retornaram uma resposta em formato inesperado"
+                    )
+
                 if payload.get("mensagem") == invalid_captcha_message:
+                    logger.warning(
+                        "captcha_rejected request_id=%s attempt=%d max_attempts=%d",
+                        request_id,
+                        attempt,
+                        max_captcha_attempts,
+                    )
                     continue
                 if payload.get("erro"):
                     raise_response_error(payload)
-                return parse_tracking_result(payload)
 
-    except TrackingScraperError:
+                results = (
+                    parse_multiple_tracking_results(payload, tracking_codes)
+                    if is_multiple
+                    else (parse_tracking_result(payload),)
+                )
+                response = TrackingResponse(results=results)
+                logger.info(
+                    "tracking_completed request_id=%s objects=%d not_found=%d events=%d duration_seconds=%.2f",
+                    request_id,
+                    len(results),
+                    sum(
+                        isinstance(result, TrackingNotFoundResult)
+                        for result in results
+                    ),
+                    sum(
+                        len(result.events)
+                        for result in results
+                        if isinstance(result, TrackingResult)
+                    ),
+                    time.perf_counter() - started_at,
+                )
+                return response
+
+    except TrackingScraperError as error:
+        logger.warning(
+            "tracking_failed request_id=%s error=%s reason=%r duration_seconds=%.2f",
+            request_id,
+            error.error_code,
+            error.message,
+            time.perf_counter() - started_at,
+        )
         raise
     except (httpx.HTTPError, ValueError) as error:
+        logger.exception(
+            "tracking_failed request_id=%s error=CORREIOS_UNAVAILABLE duration_seconds=%.2f",
+            request_id,
+            time.perf_counter() - started_at,
+        )
         raise CorreiosUnavailableError(
             "Não foi possível concluir a comunicação com o site dos Correios"
         ) from error
+    except Exception:
+        logger.exception(
+            "tracking_failed request_id=%s error=UNEXPECTED duration_seconds=%.2f",
+            request_id,
+            time.perf_counter() - started_at,
+        )
+        raise
 
+    logger.warning(
+        "tracking_failed request_id=%s error=CAPTCHA_RETRIES_EXHAUSTED duration_seconds=%.2f",
+        request_id,
+        time.perf_counter() - started_at,
+    )
     raise CaptchaRetriesExhaustedError(
         f"Captcha inválido após {max_captcha_attempts} tentativas"
     )
